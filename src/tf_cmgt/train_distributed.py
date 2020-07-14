@@ -1,8 +1,8 @@
 import os.path as path
 import logging
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel("INFO")
 
 import tensorflow as tf
 import numpy as np
@@ -216,7 +216,7 @@ def train(steps, dist_strat, batch_size = 8, learning_rate = 0.01, ckpt_path = "
     
     @tf.function(experimental_relax_shapes=True)
     def train_step(batch): 
-        dist_strat.experimental_run_v2(singel_device_train_step, args=(batch,))
+        dist_strat.run(singel_device_train_step, args=(batch,))
     
     @tf.function
     def train_loop():
