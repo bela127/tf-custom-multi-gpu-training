@@ -1,4 +1,8 @@
 import os.path as path
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel("INFO")
 
 import tensorflow as tf
 import numpy as np
@@ -77,18 +81,20 @@ def update_pre(gradients, loss, output, batch, train_model, train_loss, lr, opti
     
 
 def train(steps, dist_strat, batch_size = 8, learning_rate = 0.01, ckpt_path = "./ckpt", summary_path = "./log_dir", callbacks = standart_callbacks()):
+    logger.info("### TRAINING ###")
     writer_train = tf.summary.create_file_writer(path.join(summary_path,"./train"))
     
     if dist_strat is None:
         #singel_dev_train.train(steps = steps, get_train_model = get_train_model, dataset = dataset, batch_size = batch_size, learning_rate = learning_rate, step_callbacks = step_callbacks)
-        print("changed interface so None is not supported use a starategie")
+        logger.error("changed interface so None is not supported use a starategie")
         return
     
+    logger.info("-> creating dataset")
     if callbacks.create_dataset:
         per_replica_batch_size = batch_size // dist_strat.num_replicas_in_sync
         dataset = callbacks.create_dataset(per_replica_batch_size)
     else:
-        print("No train dataset, set create_train_dataset in the callbacks")
+        logger.error("No train dataset, set create_train_dataset in the callbacks")
         return
     
     dataset = dataset.repeat(-1)
@@ -103,10 +109,11 @@ def train(steps, dist_strat, batch_size = 8, learning_rate = 0.01, ckpt_path = "
                 return d.shard(input_context.num_input_pipelines, input_context.input_pipeline_id).take(steps)
         return dataset_fn
     
+    logger.info("-> creating batches")
     if callbacks.make_batches:
         dist_dataset = dist_strat.experimental_distribute_datasets_from_function(make_dist_dataset(dataset, steps))
     else:
-        print("No batching, set make_batches in the callbacks or use standart_callbacks")
+        logger.error("No batching, set make_batches in the callbacks or use standart_callbacks")
         return
     
     step = tf.Variable(0, trainable=False, dtype = tf.int32)
@@ -114,61 +121,68 @@ def train(steps, dist_strat, batch_size = 8, learning_rate = 0.01, ckpt_path = "
     
     with dist_strat.scope():
         
+        logger.info("-> creating optimizer")
         if callbacks.create_opt:
             optimizer = callbacks.create_opt(lr)
         else:
-            print("No optimizer, set create_opt in the callbacks or use standart_callbacks")
+            logger.error("No optimizer, set create_opt in the callbacks or use standart_callbacks")
             return
         
+        logger.info("-> creating training model")
         if callbacks.create_model:
             train_model = callbacks.create_model()
         else:
-            print("No train_model, set create_model in the callbacks")
+            logger.error("No train_model, set create_model in the callbacks")
             return
 
+        logger.info("-> creating loss function")
         if callbacks.create_loss:
             train_loss = callbacks.create_loss()
         else:
-            print("No train_loss, set create_loss in the callbacks")
+            logger.error("No train_loss, set create_loss in the callbacks")
             return
         
-
+        logger.info("-> init checkpointing")
         if callbacks.create_ckpt:
             ckpt, manager = callbacks.create_ckpt(path.join(ckpt_path,"./train"), step, lr, optimizer, train_model, train_loss)
             ckpt.restore(manager.latest_checkpoint)
             if manager.latest_checkpoint:
-                tf.print("Restored from {}".format(manager.latest_checkpoint))
+                logger.info("--> Restored from {}".format(manager.latest_checkpoint))
             else:
-                tf.print("Initializing from scratch.")
+                logger.warn("--> Initializing from scratch.")
         else:
-            print("No ckpt and manager, set create_ckpt in the callbacks or use standart_callbacks")
+            logger.warn("No ckpt and manager, set create_ckpt in the callbacks or use standart_callbacks")
             ckpt = manager = None
-            print("----#### !! continueing without checkpointing !! ####----")
+            logger.warn("----#### !! continueing without checkpointing !! ####----")
 
     @tf.function(experimental_relax_shapes=True)
     def singel_device_train_step(batch):
         
+        logger.info("--> model input preparation")
         if callbacks.input_pre:
             inputs = callbacks.input_pre(batch, lr)
         else:
-            print("No inputs, set input_pre in the callbacks or use standart_callbacks")
+            logger.error("No inputs, set input_pre in the callbacks or use standart_callbacks")
             return
-            
+        
+        logger.info("--> model building")
         output = train_model(inputs)
         
+        logger.info("--> loss input preparation")
         if callbacks.loss_pre:
             loss_input = callbacks.loss_pre(output, batch, train_model, lr)
         else:
-            print("No loss_input, set loss_pre in the callbacks or use standart_callbacks")
+            logger.error("No loss_input, set loss_pre in the callbacks or use standart_callbacks")
             return
-            
+        
+        logger.info("--> loss building")
         loss = train_loss(loss_input)
         
-        
+        logger.info("--> gradient calculation preparation")
         if callbacks.grad_pre:
             loss_per_batch, extra_loss, trainable_vars = callbacks.grad_pre(loss, output, batch, train_model, train_loss, lr)
         else:
-            print("No loss and trainable_vars, set grad_pre in the callbacks or use standart_callbacks")
+            logger.error("No loss and trainable_vars, set grad_pre in the callbacks or use standart_callbacks")
             return
 
         loss_per_input = loss_per_batch / tf.cast(batch_size, dtype=loss_per_batch.dtype)
@@ -177,19 +191,22 @@ def train(steps, dist_strat, batch_size = 8, learning_rate = 0.01, ckpt_path = "
 
         dev = tf.distribute.get_replica_context().devices
         
-        print(f"tracing gradients on {dev}")
+        logger.info(f"--> tracing gradients on {dev}")
         gradients = optimizer.get_gradients(agg_loss, trainable_vars)
 
+        logger.info("--> gradient cleaning and update preparation")
         if callbacks.update_pre:
             update_gradients, display_gradients = callbacks.update_pre(gradients, loss, output, batch, train_model, train_loss, lr, optimizer)
         else:
-            print("No gradients, set update_pre in the callbacks or use standart_callbacks")
+            logger.error("No gradients, set update_pre in the callbacks or use standart_callbacks")
             return
         
         to_optimize = zip(update_gradients, trainable_vars)
         
+        logger.info("--> update with gradients")
         optimizer.apply_gradients(to_optimize)
         
+        logger.info("--> callback functions")
         for callback_step, step_callback in callbacks.every_steps.items():
             if callback_step > 0 and step % callback_step == 0:
                 step_callback(dev, step, update_gradients, loss, output, batch, train_model, train_loss, lr, optimizer,  display_gradients, gradients, ckpt, manager)
@@ -202,7 +219,8 @@ def train(steps, dist_strat, batch_size = 8, learning_rate = 0.01, ckpt_path = "
         dist_strat.experimental_run_v2(singel_device_train_step, args=(batch,))
     
     @tf.function
-    def train_loop():  
+    def train_loop():
+        logger.info("-> training loop")
         with dist_strat.scope():
             for batch in dist_dataset:
                 step.assign_add(1)
