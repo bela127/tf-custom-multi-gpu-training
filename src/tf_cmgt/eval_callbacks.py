@@ -15,7 +15,7 @@ def standart_callbacks():
     
     callbacks.create_loss = None
     
-    load_ckpt = None
+    callbacks.load_ckpt = None
         
     callbacks.input_pre = input_pre
     callbacks.loss_pre = loss_pre
